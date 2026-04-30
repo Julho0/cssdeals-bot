@@ -1,6 +1,5 @@
 import os, asyncio, requests
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 import discord
 
@@ -8,7 +7,7 @@ load_dotenv()
 
 BOT_TOKEN      = os.getenv("DISCORD_BOT_TOKEN", "")
 CHANNEL_ID     = int(os.getenv("CHANNEL_ID", "0"))
-CHECK_INTERVAL = 120
+CHECK_INTERVAL = 90
 CSSDEALS_URL   = "https://cssdeals.com"
 API_URL        = f"{CSSDEALS_URL}/api/product?fields=1&pageSize=20&page="
 HEADERS        = {
@@ -16,54 +15,67 @@ HEADERS        = {
     "Accept": "application/json",
     "Referer": f"{CSSDEALS_URL}/",
 }
-MAX_WORKERS = 5
 
-seen_ids  = set()
-first_run = True
+seen_ids       = set()
+first_run      = True
+last_total     = 0   # último total conhecido de itens
 
 intents = discord.Intents.default()
 client  = discord.Client(intents=intents)
 
 def parse_item(rec: dict) -> dict:
     sku   = rec["skus"][0] if rec.get("skus") else {}
-    image = sku.get("image", "")
-    price = sku.get("price", "?")
-    title = rec.get("title", "Sem título")
     pid   = str(rec.get("id", ""))
-    link  = f"{CSSDEALS_URL}/product-detail.html?itemid={pid}"
-    return {"id": pid, "title": title, "price": f"¥{price}", "link": link, "image": image}
+    return {
+        "id":    pid,
+        "title": rec.get("title", "Sem título"),
+        "price": f"¥{sku.get('price', '?')}",
+        "link":  f"{CSSDEALS_URL}/product-detail.html?itemid={pid}",
+        "image": sku.get("image", ""),
+    }
 
-def fetch_page(page: int) -> list:
+def fetch_page(page: int):
     try:
         r = requests.get(API_URL + str(page), headers=HEADERS, timeout=15)
         if r.status_code != 200:
-            return []
-        return r.json().get("data", {}).get("records", [])
+            return [], 0
+        data    = r.json().get("data", {})
+        total   = int(data.get("total", 0))
+        records = data.get("records", [])
+        return records, total
     except:
-        return []
+        return [], 0
 
-def get_total_pages() -> int:
-    try:
-        r = requests.get(API_URL + "1", headers=HEADERS, timeout=15)
-        total = int(r.json().get("data", {}).get("total", 0))
-        return max(1, (total + 19) // 20)
-    except:
-        return 1
+def fetch_products() -> list:
+    """
+    Checa as primeiras 50 páginas sempre.
+    Se o total de itens aumentou desde a última checagem,
+    varre todas as páginas para garantir que não perde nada.
+    """
+    global last_total
 
-def fetch_all_products() -> list:
-    total_pages = get_total_pages()
-    print(f"  [API] Total de páginas: {total_pages}")
-    all_records = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(fetch_page, p): p for p in range(1, total_pages + 1)}
-        done = 0
-        for future in as_completed(futures):
-            all_records.extend(future.result())
-            done += 1
-            if done % 50 == 0:
-                print(f"  [API] {done}/{total_pages} páginas processadas...")
-    print(f"  [API] Varredura completa: {len(all_records)} itens")
-    return [parse_item(r) for r in all_records if r.get("id")]
+    # Pega total atual
+    _, current_total = fetch_page(1)
+    total_pages = max(1, (current_total + 19) // 20)
+
+    # Decide quantas páginas varrer
+    if last_total > 0 and current_total > last_total:
+        pages_to_scan = total_pages  # total aumentou — varre tudo
+        print(f"  [API] Total aumentou ({last_total}→{current_total}), varrendo todas as {total_pages} páginas...")
+    else:
+        pages_to_scan = min(50, total_pages)  # normal — só primeiras 50
+        print(f"  [API] Total: {current_total} | Checando {pages_to_scan} páginas...")
+
+    last_total = current_total
+
+    all_items = []
+    for page in range(1, pages_to_scan + 1):
+        records, _ = fetch_page(page)
+        for rec in records:
+            all_items.append(parse_item(rec))
+
+    print(f"  [API] {len(all_items)} itens carregados")
+    return all_items
 
 async def post_item(channel, item: dict):
     embed = discord.Embed(
@@ -76,7 +88,6 @@ async def post_item(channel, item: dict):
     embed.add_field(name="🛒 Comprar", value=f"[Ver no CSSDeals]({item['link']})", inline=True)
     if item.get("image") and item["image"].startswith("http"):
         embed.set_image(url=item["image"])
-    # Sem set_footer e sem timestamp — só aparece a hora do Discord naturalmente
     await channel.send(embed=embed)
 
 async def monitor_loop():
@@ -91,10 +102,10 @@ async def monitor_loop():
     print(f"✅ Canal encontrado: #{channel.name}")
 
     while not client.is_closed():
-        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Iniciando varredura completa...")
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Checando CSSDeals...")
         try:
             loop  = asyncio.get_event_loop()
-            items = await loop.run_in_executor(None, fetch_all_products)
+            items = await loop.run_in_executor(None, fetch_products)
 
             if first_run:
                 seen_ids = {i["id"] for i in items}
