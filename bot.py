@@ -29,13 +29,7 @@ def parse_item(rec: dict) -> dict:
     title = rec.get("title", "Sem título")
     pid   = str(rec.get("id", ""))
 
-    # Link: usa sourceLink se disponível, senão página do CSSDeals
-    source_link = rec.get("sourceLink", "")
-    if source_link and source_link.startswith("http"):
-        buy_link = source_link
-    else:
-        buy_link = f"{CSSDEALS_URL}/product-detail.html?itemid={pid}"
-
+    # Link forçado apenas para a página do CSSDeals
     cssdeals_link = f"{CSSDEALS_URL}/product-detail.html?itemid={pid}"
 
     platform_map = {1: "Taobao", 2: "Weidian", 3: "1688", 99: "CSSDeals"}
@@ -45,8 +39,8 @@ def parse_item(rec: dict) -> dict:
         "id":       pid,
         "title":    title,
         "price":    f"¥{price}",
-        "link":     cssdeals_link,   # link sempre pro CSSDeals
-        "buy_link": buy_link,        # link de compra direto
+        "link":     cssdeals_link,   # link do título do embed
+        "buy_link": cssdeals_link,   # link do campo "Comprar"
         "image":    image,
         "platform": platform,
     }
