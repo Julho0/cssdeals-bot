@@ -16,99 +16,104 @@ HEADERS        = {
     "Referer": f"{CSSDEALS_URL}/",
 }
 
-seen_in_memory = set()
-first_run = True
+seen_ids      = set()   # IDs já vistos
+first_run     = True
 
 intents = discord.Intents.default()
 client  = discord.Client(intents=intents)
 
-def item_id(item: dict) -> str:
-    return hashlib.md5(str(item.get("id", "") or item.get("title", "")).encode()).hexdigest()
+def parse_item(rec: dict) -> dict:
+    sku   = rec["skus"][0] if rec.get("skus") else {}
+    image = sku.get("image", "")
+    price = sku.get("price", "?")
+    title = rec.get("title", "Sem título")
+    pid   = str(rec.get("id", ""))
 
-def get_platform_link(record: dict) -> str:
-    """Gera link de compra baseado na plataforma."""
-    platform = record.get("salePlatform")
-    item_id_val = record.get("itemId") or record.get("id", "")
-    sku = ""
-    if record.get("skus"):
-        sku = record["skus"][0].get("skuId", "")
+    # Link: usa sourceLink se disponível, senão página do CSSDeals
+    source_link = rec.get("sourceLink", "")
+    if source_link and source_link.startswith("http"):
+        buy_link = source_link
+    else:
+        buy_link = f"{CSSDEALS_URL}/product-detail.html?itemid={pid}"
 
-    if platform == 1:  # Taobao
-        link = f"https://item.taobao.com/item.htm?id={item_id_val}"
-        if sku:
-            link += f"&sku_id={sku}"
-        return link
-    elif platform == 2:  # Weidian
-        return f"https://weidian.com/item.html?itemID={item_id_val}"
-    elif platform == 3:  # 1688
-        return f"https://detail.1688.com/offer/{item_id_val}.html"
-    return f"{CSSDEALS_URL}/product-detail.html?itemid={item_id_val}"
+    cssdeals_link = f"{CSSDEALS_URL}/product-detail.html?itemid={pid}"
 
-def fetch_all_products() -> list:
-    """Busca todos os produtos de todas as páginas."""
-    all_items = []
+    platform_map = {1: "Taobao", 2: "Weidian", 3: "1688", 99: "CSSDeals"}
+    platform = platform_map.get(rec.get("salePlatform", 0), "Ver site")
+
+    return {
+        "id":       pid,
+        "title":    title,
+        "price":    f"¥{price}",
+        "link":     cssdeals_link,   # link sempre pro CSSDeals
+        "buy_link": buy_link,        # link de compra direto
+        "image":    image,
+        "platform": platform,
+    }
+
+def fetch_new_products() -> list:
+    """
+    Busca páginas até encontrar apenas IDs já conhecidos.
+    Na primeira execução, registra tudo sem postar.
+    """
+    new_items = []
     page = 1
+    max_pages = 50  # segurança: nunca passa de 50 páginas por ciclo
 
-    while True:
+    while page <= max_pages:
         try:
             r = requests.get(API_URL + str(page), headers=HEADERS, timeout=15)
             if r.status_code != 200:
                 print(f"  [API] Página {page} retornou {r.status_code}, parando.")
                 break
 
-            data = r.json()
+            data    = r.json()
             records = data.get("data", {}).get("records", [])
-            total   = data.get("data", {}).get("total", 0)
+            total   = int(data.get("data", {}).get("total", 0))
 
             if not records:
                 break
 
-            for rec in records:
-                sku   = rec["skus"][0] if rec.get("skus") else {}
-                image = sku.get("image", "")
-                if image and "?" not in image:
-                    image += "?x-oss-process=image/resize,w_500"
-
-                price = sku.get("price", "?")
-                title = rec.get("title", "Sem título")
-                link  = get_platform_link(rec)
-
-                all_items.append({
-                    "id":    rec.get("id", ""),
-                    "title": title,
-                    "price": f"¥{price}",
-                    "link":  link,
-                    "image": image,
-                    "platform": rec.get("salePlatform", 0),
-                })
-
-            total = int(total)
             total_pages = (total + 19) // 20
-            print(f"  [API] Página {page}/{total_pages}: {len(records)} itens | Total: {total}")
+            print(f"  [API] Página {page}/{total_pages}: {len(records)} itens")
 
-            if page >= total_pages or page >= 5:
+            found_known = False
+            for rec in records:
+                pid = str(rec.get("id", ""))
+                if pid in seen_ids:
+                    found_known = True
+                    # Não para imediatamente — continua o loop da página
+                    # mas marca que já achou conhecido
+                else:
+                    new_items.append(parse_item(rec))
+
+            # Se achou pelo menos um ID conhecido nessa página,
+            # todos os próximos também são conhecidos — pode parar
+            if found_known and not first_run:
+                print(f"  [API] IDs conhecidos encontrados na página {page}, parando busca.")
                 break
+
+            if page >= total_pages:
+                break
+
             page += 1
-            time.sleep(0.5)  # respeita o servidor
+            time.sleep(0.3)
 
         except Exception as e:
             print(f"  [ERRO API página {page}] {e}")
             break
 
-    return all_items
+    return new_items
 
 async def post_item(channel, item: dict):
-    platform_names = {1: "Taobao", 2: "Weidian", 3: "1688"}
-    platform = platform_names.get(item.get("platform", 0), "Ver site")
-
     embed = discord.Embed(
         title=f"🔥 Novo no CSSDeals!\n{item['title'][:250]}",
         url=item["link"],
         color=0xFF6B00,
     )
-    embed.add_field(name="💰 Preço",    value=item["price"],                          inline=True)
-    embed.add_field(name="🛍️ Plataforma", value=platform,                             inline=True)
-    embed.add_field(name="🛒 Comprar",  value=f"[Clique aqui]({item['link']})",       inline=False)
+    embed.add_field(name="💰 Preço",      value=item["price"],                              inline=True)
+    embed.add_field(name="🛍️ Plataforma", value=item["platform"],                           inline=True)
+    embed.add_field(name="🛒 Comprar",    value=f"[Clique aqui]({item['buy_link']})",        inline=False)
 
     if item.get("image") and item["image"].startswith("http"):
         embed.set_image(url=item["image"])
@@ -118,7 +123,7 @@ async def post_item(channel, item: dict):
     await channel.send(embed=embed)
 
 async def monitor_loop():
-    global seen_in_memory, first_run
+    global seen_ids, first_run
     await client.wait_until_ready()
     channel = client.get_channel(CHANNEL_ID)
 
@@ -129,26 +134,24 @@ async def monitor_loop():
     print(f"✅ Canal encontrado: #{channel.name}")
 
     while not client.is_closed():
-        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Checando todas as páginas do CSSDeals...")
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Checando CSSDeals...")
         try:
             loop  = asyncio.get_event_loop()
-            items = await loop.run_in_executor(None, fetch_all_products)
-            print(f"  → {len(items)} itens encontrados no total")
-
-            current_ids = {item_id(i) for i in items}
+            items = await loop.run_in_executor(None, fetch_new_products)
 
             if first_run:
-                seen_in_memory = current_ids.copy()
-                print(f"  → Primeira execução: {len(seen_in_memory)} itens registrados (sem postar).")
+                # Registra todos os IDs existentes sem postar
+                for item in items:
+                    seen_ids.add(item["id"])
+                print(f"  → Primeira execução: {len(seen_ids)} itens registrados (sem postar).")
                 first_run = False
             else:
-                new_items = [i for i in items if item_id(i) not in seen_in_memory]
-                print(f"  → {len(new_items)} novos itens!")
-                for item in reversed(new_items):
+                print(f"  → {len(items)} novos itens!")
+                for item in reversed(items):  # mais antigo primeiro
                     await post_item(channel, item)
                     print(f"  ✔ Postado: {item['title'][:60]}")
+                    seen_ids.add(item["id"])
                     await asyncio.sleep(2)
-                seen_in_memory = current_ids.copy()
 
         except Exception as e:
             print(f"  [ERRO] {e}")
