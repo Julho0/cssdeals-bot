@@ -29,7 +29,13 @@ def parse_item(rec: dict) -> dict:
     title = rec.get("title", "Sem título")
     pid   = str(rec.get("id", ""))
 
-    # Link forçado apenas para a página do CSSDeals
+    # Link: usa sourceLink se disponível, senão página do CSSDeals
+    source_link = rec.get("sourceLink", "")
+    if source_link and source_link.startswith("http"):
+        buy_link = source_link
+    else:
+        buy_link = f"{CSSDEALS_URL}/product-detail.html?itemid={pid}"
+
     cssdeals_link = f"{CSSDEALS_URL}/product-detail.html?itemid={pid}"
 
     platform_map = {1: "Taobao", 2: "Weidian", 3: "1688", 99: "CSSDeals"}
@@ -39,8 +45,8 @@ def parse_item(rec: dict) -> dict:
         "id":       pid,
         "title":    title,
         "price":    f"¥{price}",
-        "link":     cssdeals_link,   # link do título do embed
-        "buy_link": cssdeals_link,   # link do campo "Comprar"
+        "link":     cssdeals_link,   # link sempre pro CSSDeals
+        "buy_link": buy_link,        # link de compra direto
         "image":    image,
         "platform": platform,
     }
@@ -101,13 +107,13 @@ def fetch_new_products() -> list:
 
 async def post_item(channel, item: dict):
     embed = discord.Embed(
-        title=f"🔥 Novo no CSSDeals!\n{item['title'][:250]}",
+        title=item["title"][:256],
         url=item["link"],
         color=0xFF6B00,
     )
-    embed.add_field(name="💰 Preço",      value=item["price"],                              inline=True)
-    embed.add_field(name="🛍️ Plataforma", value=item["platform"],                           inline=True)
-    embed.add_field(name="🛒 Comprar",    value=f"[Clique aqui]({item['buy_link']})",        inline=False)
+    embed.set_author(name="🔥 Novo no CSSDeals!")
+    embed.add_field(name="💰 Preço", value=item["price"], inline=True)
+    embed.add_field(name="🛒 Comprar", value=f"[Ver no CSSDeals]({item['buy_link']})", inline=True)
 
     if item.get("image") and item["image"].startswith("http"):
         embed.set_image(url=item["image"])
